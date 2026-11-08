@@ -844,6 +844,7 @@ test.describe("Inline Editor", () => {
 			"block",
 			"image",
 			"image",
+			"youtube",
 			"block",
 		]);
 	});
@@ -1065,5 +1066,53 @@ test.describe("Text field editing", () => {
 
 		await expect(field).toHaveText(`${text[0]}X${text.slice(-1)}`);
 		await page.keyboard.press("Escape");
+	});
+});
+
+test.describe("Plugin block editing", () => {
+	test("edits a plugin block and previews the saved result", async ({ page, serverInfo }) => {
+		await enableEditMode(page);
+		await gotoWithRetry(page, POST_WITH_IMAGE_PATH);
+
+		const pluginBlock = page.locator(
+			'.emdash-inline-editor [data-emdash-plugin-block="true"][data-block-type="youtube"]',
+		);
+		await expect(pluginBlock).toBeVisible({ timeout: 15000 });
+		await pluginBlock.click();
+
+		const dialog = page.getByRole("dialog", { name: "Edit YouTube Video" });
+		await expect(dialog).toBeVisible();
+		await dialog.getByLabel("YouTube URL").fill("https://www.youtube.com/watch?v=oHg5SJYRHA0");
+		await dialog.getByLabel("Title").fill("Updated inline preview title");
+
+		const saveResponse = page.waitForResponse(
+			(response) =>
+				response.url().includes("/_emdash/api/content/posts/") &&
+				response.request().method() === "PUT",
+		);
+		await dialog.getByRole("button", { name: "Save", exact: true }).click();
+		expect((await saveResponse).ok()).toBe(true);
+		await expect(dialog).toBeHidden();
+
+		const postId = serverInfo.contentIds.posts[3]!;
+		const response = await page.request.get(`/_emdash/api/content/posts/${postId}?locale=en`);
+		const payload = (await response.json()) as {
+			data?: { item?: { data?: { body?: Array<Record<string, unknown>> } } };
+		};
+		const savedBlock = payload.data?.item?.data?.body?.find((block) => block._type === "youtube");
+		expect(savedBlock).toMatchObject({
+			_key: "yt1",
+			id: "https://www.youtube.com/watch?v=oHg5SJYRHA0",
+			title: "Updated inline preview title",
+		});
+
+		await page.request.post(`/_emdash/api/content/posts/${postId}/publish`, {
+			headers: { "X-EmDash-Request": "1" },
+		});
+		await page.context().clearCookies();
+		await gotoWithRetry(page, POST_WITH_IMAGE_PATH);
+		const preview = page.locator("lite-youtube");
+		await expect(preview).toBeVisible();
+		await expect(preview).toHaveAttribute("title", "Updated inline preview title");
 	});
 });

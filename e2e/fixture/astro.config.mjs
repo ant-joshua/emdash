@@ -10,6 +10,7 @@ import { fileURLToPath } from "node:url";
 import node from "@astrojs/node";
 import react from "@astrojs/react";
 import { colorPlugin } from "@emdash-cms/plugin-color";
+import { embedsPlugin } from "@emdash-cms/plugin-embeds";
 import registryTestPlugin from "@emdash-cms/plugin-marketplace-test";
 import { defineConfig } from "astro/config";
 import emdash from "emdash/astro";
@@ -110,7 +111,7 @@ export default defineConfig({
 		emdash({
 			database: sqlite({ url: dbUrl }),
 			middleware: { outer: "./src/outer-middleware.ts" },
-			plugins: [colorPlugin()],
+			plugins: [colorPlugin(), embedsPlugin()],
 			sandboxed: [editorExtensionsPlugin, { ...registryTestPlugin, hooks: e2eHooks }, deniedPlugin],
 			marketplace: marketplaceUrl,
 			registry: registryUrl,

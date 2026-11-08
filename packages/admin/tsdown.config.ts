@@ -71,6 +71,7 @@ export default defineConfig({
 		"src/internal/co-editing/types.ts",
 		"src/html-block.ts",
 		"src/internal/video-block.ts",
+		"src/plugin-block-modal.ts",
 		"src/slugify.ts",
 	],
 	format: ["esm"],
@@ -88,5 +89,6 @@ export default defineConfig({
 		// Keep TanStack external - Vite in consumer project will need to resolve these
 		"@tanstack/react-router",
 		"@tanstack/react-query",
+		"@emdash-cms/admin/locales",
 	],
 });

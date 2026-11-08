@@ -65,10 +65,15 @@
     "./internal/video-block": {
       "types": "./dist/internal/video-block.d.ts",
       "default": "./dist/internal/video-block.js"
+    },
+    "./inline-editor-styles.css": "./dist/inline-editor-styles.css",
+    "./plugin-block-modal": {
+      "types": "./dist/plugin-block-modal.d.ts",
+      "default": "./dist/plugin-block-modal.js"
     }
   },
   "scripts": {
-    "build": "node --run locale:compile && tsdown && node --run locale:copy && npx @tailwindcss/cli -i src/styles.css -o dist/styles.css --minify",
+    "build": "node --run locale:compile && tsdown && node --run locale:copy && npx @tailwindcss/cli -i src/styles.css -o dist/styles.css --minify && npx @tailwindcss/cli -i src/inline-editor-styles.css -o dist/inline-editor-styles.css --minify",
     "dev": "tsdown --watch",
     "prepublishOnly": "node --run build",
     "check": "publint && attw --pack --ignore-rules=cjs-resolves-to-esm --ignore-rules=no-resolution",
