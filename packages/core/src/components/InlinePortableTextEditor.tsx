@@ -1,7 +1,8 @@
 /**
  * Self-contained inline Portable Text editor for visual editing.
  *
- * Uses TipTap directly with content extensions — no admin UI deps.
+ * Uses TipTap directly with content extensions; plugin block forms load lazily
+ * from the admin package when an editor selects one.
  * Includes the admin editor's selection toolbar and slash menu, and a
  * toolbar and picker for images, but no fixed toolbar, sidebar, or section
  * picker.
@@ -11,6 +12,7 @@
  */
 
 import { htmlBlockFields } from "@emdash-cms/admin/html-block";
+import type { PluginBlockDef } from "@emdash-cms/admin/plugin-block-modal";
 import { Node, mergeAttributes, type JSONContent } from "@tiptap/core";
 import Focus from "@tiptap/extension-focus";
 import Link from "@tiptap/extension-link";
@@ -20,7 +22,7 @@ import Superscript from "@tiptap/extension-superscript";
 import TextAlign from "@tiptap/extension-text-align";
 import Typography from "@tiptap/extension-typography";
 import Underline from "@tiptap/extension-underline";
-import { Plugin, type Transaction } from "@tiptap/pm/state";
+import { NodeSelection, Plugin, type Transaction } from "@tiptap/pm/state";
 import { useEditor, EditorContent, type Editor } from "@tiptap/react";
 import StarterKit from "@tiptap/starter-kit";
 import { exitSuggestion } from "@tiptap/suggestion";
@@ -87,6 +89,11 @@ interface PTTextBlock {
 type PTTableBlock = { _type: "table"; [key: string]: unknown };
 type PTBlock = PTTextBlock | PTTableBlock | { _type: string; _key: string; [key: string]: unknown };
 const TABLE_BLOCK_PLACEHOLDER_HTML = /<[^>]+\bdata-emdash-table-block(?:\s|=|>)/i;
+const InlinePluginBlockModal = React.lazy(() =>
+	import("@emdash-cms/admin/plugin-block-modal").then((module) => ({
+		default: module.PluginBlockModal,
+	})),
+);
 
 /** Type guard for PTTextBlock */
 function isPTTextBlock(block: PTBlock): block is PTTextBlock {
@@ -348,12 +355,12 @@ function convertPMNode(node: PMNode, path: string): PTBlock | PTBlock[] | null {
 			// Spread the captured data back out so the block round-trips losslessly.
 			// `data` holds every field except _type / _key and the identity field
 			// (`id` or `url`, named by `identityField`), which live on dedicated attrs.
-			const { blockType, id, identityField, data } = node.attrs ?? {};
+			const { blockType, key, id, identityField, data } = node.attrs ?? {};
 			const field = identityField === "url" || identityField === "" ? identityField : "id";
 			return {
 				...(data && typeof data === "object" ? data : {}),
 				_type: typeof blockType === "string" ? blockType : "embed",
-				_key: k(),
+				_key: typeof key === "string" && /^[A-Za-z0-9_-]{1,120}$/.test(key) ? key : k(),
 				...(field ? { [field]: typeof id === "string" ? id : "" } : {}),
 			};
 		}
@@ -690,6 +697,7 @@ function convertPTBlock(block: PTBlock): PMNode | null {
 		type: "pluginBlock",
 		attrs: {
 			blockType: typeof block._type === "string" ? block._type : "embed",
+			key: typeof block._key === "string" ? block._key : "",
 			id: typeof identity === "string" ? identity : "",
 			identityField,
 			data,
@@ -987,18 +995,12 @@ const TableBlockNode = Node.create<{ placeholder: string }>({
 /**
  * Minimal `pluginBlock` TipTap node for the inline (visual-editing) editor.
  *
- * Plugin-contributed Portable Text block types (e.g. `marketing.hero`) are
- * editable in the admin via a Block Kit modal. The visual-editing surface
- * deliberately does NOT offer that UX — it would need to fetch the manifest,
- * mount the modal, and round-trip through plugin-block plumbing that lives in
- * `@emdash-cms/admin`. Instead, the inline editor renders these blocks as a
- * read-only placeholder so editors can see they exist and edit the surrounding
- * content without losing the block's data.
+ * Plugin-contributed Portable Text blocks stay atomic in the visual editor;
+ * selecting one opens its Block Kit form from `@emdash-cms/admin`. The full
+ * block payload is preserved on `data` for the PT ↔ PM round-trip.
  *
- * The full block payload is preserved on `data` and round-tripped losslessly
- * through PT ↔ PM conversion (see convertPTBlock/convertPMNode). Without this
- * extension, ProseMirror's schema would silently filter unknown nodes on load
- * and the next save would persist the block's disappearance.
+ * Without this extension, ProseMirror's schema would silently filter unknown
+ * nodes on load and the next save would persist the block's disappearance.
  */
 const PluginBlockNode = Node.create({
 	name: "pluginBlock",
@@ -1014,6 +1016,7 @@ const PluginBlockNode = Node.create({
 		const noDom = { rendered: false, parseHTML: () => null };
 		return {
 			blockType: { default: "", ...noDom },
+			key: { default: "", ...noDom },
 			id: { default: "", ...noDom },
 			identityField: { default: "id", ...noDom },
 			data: { default: {}, ...noDom },
@@ -1035,7 +1038,7 @@ const PluginBlockNode = Node.create({
 				class: "emdash-plugin-block-placeholder",
 				contenteditable: "false",
 			}),
-			`Plugin block: ${label} (edit in admin)`,
+			`Plugin block: ${label} (select to edit)`,
 		];
 	},
 });
@@ -1057,6 +1060,17 @@ export function InlinePortableTextEditor({
 	field,
 	tablePlaceholder = TableBlockNode.options.placeholder,
 }: InlinePortableTextEditorProps) {
+	const [pluginBlockToEdit, setPluginBlockToEdit] = React.useState<{
+		pos: number;
+		block: PluginBlockDef;
+		initialValues: Record<string, unknown>;
+	} | null>(null);
+	const [pluginBlocks, setPluginBlocks] = React.useState<PluginBlockDef[] | null>(null);
+	const [selectedPluginBlock, setSelectedPluginBlock] = React.useState<{
+		pos: number;
+		attrs: Record<string, unknown>;
+	} | null>(null);
+	const [pluginBlocksError, setPluginBlocksError] = React.useState(false);
 	const initialRef = React.useRef(value);
 	// The editor document last known to be stored: the one the loaded content
 	// produced, then the one each successful save sent. `save()` does nothing
@@ -1284,6 +1298,89 @@ export function InlinePortableTextEditor({
 		},
 	});
 
+	React.useEffect(() => {
+		if (!editor) return;
+		const update = () => {
+			const selection = editor.state.selection;
+			if (!(selection instanceof NodeSelection) || selection.node.type.name !== "pluginBlock") {
+				setSelectedPluginBlock(null);
+				return;
+			}
+			setSelectedPluginBlock({ pos: selection.from, attrs: selection.node.attrs });
+		};
+		editor.on("selectionUpdate", update);
+		update();
+		return () => {
+			editor.off("selectionUpdate", update);
+		};
+	}, [editor]);
+
+	React.useEffect(() => {
+		if (!selectedPluginBlock) return;
+		let cancelled = false;
+		const load = async () => {
+			try {
+				let blocks = pluginBlocks;
+				if (!blocks) {
+					const response = await fetch("/_emdash/api/manifest", { credentials: "same-origin" });
+					if (!response.ok) throw new Error("Manifest request failed");
+					const body = (await response.json()) as {
+						data?: {
+							plugins?: Record<string, { portableTextBlocks?: Omit<PluginBlockDef, "pluginId">[] }>;
+						};
+					};
+					blocks = Object.entries(body.data?.plugins ?? {}).flatMap(([pluginId, plugin]) =>
+						(plugin.portableTextBlocks ?? []).map((block) => ({ ...block, pluginId })),
+					);
+					if (!cancelled) setPluginBlocks(blocks);
+				}
+				const blockType = String(selectedPluginBlock.attrs.blockType ?? "");
+				const block = blocks.find((item) => item.type === blockType);
+				if (!block) throw new Error("Plugin block definition is unavailable");
+				if (!cancelled) {
+					const data = selectedPluginBlock.attrs.data;
+					setPluginBlockToEdit({
+						pos: selectedPluginBlock.pos,
+						block,
+						initialValues: {
+							id: selectedPluginBlock.attrs.id,
+							...(typeof data === "object" && data !== null ? data : {}),
+						},
+					});
+				}
+			} catch {
+				if (!cancelled) setPluginBlocksError(true);
+			}
+		};
+		void load();
+		return () => {
+			cancelled = true;
+		};
+	}, [pluginBlocks, selectedPluginBlock]);
+
+	const savePluginBlock = React.useCallback(
+		(values: Record<string, unknown>) => {
+			if (!editor || !pluginBlockToEdit) return;
+			const { id, ...data } = values;
+			editor
+				.chain()
+				.command(({ tr }) => {
+					const node = tr.doc.nodeAt(pluginBlockToEdit.pos);
+					if (node?.type.name !== "pluginBlock") return false;
+					tr.setNodeMarkup(pluginBlockToEdit.pos, undefined, {
+						...node.attrs,
+						id: typeof id === "string" ? id : node.attrs.id,
+						data,
+					});
+					return true;
+				})
+				.run();
+			setPluginBlockToEdit(null);
+			void save();
+		},
+		[editor, pluginBlockToEdit, save],
+	);
+
 	// Store editor ref for getBlocks, and record the loaded document as saved.
 	React.useEffect(() => {
 		editorRef.current = editor;
@@ -1387,6 +1484,24 @@ export function InlinePortableTextEditor({
 			{saveError ? (
 				<div className="emdash-inline-editor-error" role="alert" dir="auto">
 					{saveError}
+				</div>
+			) : null}
+			{pluginBlockToEdit && (
+				<React.Suspense fallback={null}>
+					<InlinePluginBlockModal
+						block={pluginBlockToEdit.block}
+						initialValues={pluginBlockToEdit.initialValues}
+						onClose={() => setPluginBlockToEdit(null)}
+						onInsert={savePluginBlock}
+					/>
+				</React.Suspense>
+			)}
+			{pluginBlocksError ? (
+				<div className="emdash-inline-editor-error" role="alert" dir="auto">
+					This plugin block cannot be edited here. Open the content editor to edit it.
+					<button type="button" onClick={() => setPluginBlocksError(false)}>
+						Dismiss
+					</button>
 				</div>
 			) : null}
 			{unsupportedFileGuidance ? (

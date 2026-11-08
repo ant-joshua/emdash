@@ -7,6 +7,7 @@
  * for `client:load` to find a matching renderer.
  */
 import { InlinePortableTextEditor } from "./InlinePortableTextEditor";
+import adminStylesUrl from "@emdash-cms/admin/inline-editor-styles.css?url";
 
 export interface Props {
 	value: unknown[];
@@ -19,6 +20,7 @@ export interface Props {
 const { value, collection, entryId, field, tablePlaceholder } = Astro.props;
 ---
 
+<link rel="stylesheet" href={adminStylesUrl} />
 <InlinePortableTextEditor
 	client:only="react"
 	value={value}

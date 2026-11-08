@@ -2689,7 +2689,7 @@ function pluginBlockProblems(
  * When the block has `fields`, renders Block Kit elements.
  * Otherwise falls back to a simple URL input.
  */
-function PluginBlockModal({
+export function PluginBlockModal({
 	block,
 	initialValues,
 	onClose,

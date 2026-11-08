@@ -245,6 +245,12 @@ async function seedTestData(
 					height: 1,
 				},
 				{
+					_type: "youtube",
+					_key: "yt1",
+					id: "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+					title: "Original fixture title",
+				},
+				{
 					_type: "block",
 					_key: "b2",
 					style: "normal",
