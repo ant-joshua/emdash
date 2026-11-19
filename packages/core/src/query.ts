@@ -182,7 +182,7 @@ export interface CollectionFilterBase {
 	status?: "draft" | "published" | "archived";
 	limit?: number;
 	/**
-	 * Filter by field values, taxonomy terms, byline credits, or ranges.
+	 * Filter by field values, taxonomy terms, byline credits, ranges, and bounded operators.
 	 *
 	 * Taxonomy names are detected automatically and filtered via JOIN.
 	 * The reserved `byline` key filters by byline credit (any credit, not
@@ -197,8 +197,11 @@ export interface CollectionFilterBase {
 	 * @example { byline: ['01HXYZ...', '01HABC...'] } - Credited to any of these bylines (OR)
 	 * @example { series: 'main' } - Exact match on a content field
 	 * @example { published_at: { gte: '2024-01-01', lt: '2025-01-01' } } - Date range
+	 * @example { title: { contains: 'Ramadan' }, status: { ne: 'archived' } } - Text search and inequality
 	 */
 	where?: Record<string, WhereValue>;
+	/** OR branches of field filters; predicates within each branch AND together. */
+	whereAny?: Record<string, WhereValue>[];
 	/**
 	 * Order results by field(s)
 	 * @default { created_at: "desc" }
@@ -785,6 +788,7 @@ function collectionCacheKey(type: string, filter?: CollectionFilter): string {
 		filter.cursor ?? "",
 		filter.offset ?? "",
 		filter.where ? stableStringify(filter.where) : "",
+		filter.whereAny ? JSON.stringify(filter.whereAny.map((branch) => isRecord(branch) ? stableStringify(branch) : "invalid")) : "",
 		filter.orderBy ? JSON.stringify(filter.orderBy) : "",
 		filter.locale === undefined ? "" : resolveConfiguredLocale(filter.locale),
 	];
@@ -970,6 +974,7 @@ async function getEmDashCollectionUncached<T extends string, D = InferCollection
 		limit: requestedLimit && requestedLimit > 0 ? requestedLimit + 1 : filter?.limit,
 		...pageParam,
 		where: filter?.where,
+		whereAny: filter?.whereAny,
 		orderBy: filter?.orderBy,
 		locale: resolvedLocale,
 		draftRevisions,

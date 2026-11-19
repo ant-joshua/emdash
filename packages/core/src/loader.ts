@@ -1187,8 +1187,13 @@ function buildFieldConditions(
 	const conditions: ReturnType<typeof sql>[] = [];
 
 	const arrayLengths = Object.entries(fields)
-		.filter((entry): entry is [string, string[]] => Array.isArray(entry[1]))
-		.map(([key, value]) => [key, value.length] as const)
+		.flatMap(([key, value]) =>
+			Array.isArray(value)
+				? [[key, value.length] as const]
+				: isWhereRange(value) && Array.isArray(value.notIn)
+					? [[key, value.notIn.length] as const]
+					: [],
+		)
 		.toSorted((a, b) => b[1] - a[1]);
 	let inlineValues = arrayLengths.reduce((sum, [, length]) => sum + length, 0);
 	const asJson = new Set<string>();
@@ -1207,8 +1212,8 @@ function buildFieldConditions(
 		const ref = tablePrefix ? sql.ref(`${tablePrefix}.${key}`) : sql.ref(key);
 
 		if (isWhereRange(value)) {
-			const { gt, gte, lt, lte } = value;
-			if (gt === undefined && gte === undefined && lt === undefined && lte === undefined) {
+			const { gt, gte, lt, lte, ne, notIn, contains, notContains, exists, notExists } = value;
+			if (gt === undefined && gte === undefined && lt === undefined && lte === undefined && ne === undefined && notIn === undefined && contains === undefined && notContains === undefined && exists === undefined && notExists === undefined) {
 				// An object with no bound (for example `{ in: [...] }`) would add no
 				// condition, and the query would return unfiltered rows.
 				console.warn(
@@ -1220,6 +1225,20 @@ function buildFieldConditions(
 			if (gte !== undefined) conditions.push(sql`${ref} >= ${bindableFilterValue(gte)}`);
 			if (lt !== undefined) conditions.push(sql`${ref} < ${bindableFilterValue(lt)}`);
 			if (lte !== undefined) conditions.push(sql`${ref} <= ${bindableFilterValue(lte)}`);
+			if (ne !== undefined) conditions.push(sql`${ref} <> ${bindableFilterValue(ne)}`);
+			if (exists === true) conditions.push(sql`${ref} IS NOT NULL`);
+			if (notExists === true) conditions.push(sql`${ref} IS NULL`);
+			if (Array.isArray(notIn) && notIn.length > 0) {
+				if (asJson.has(key)) {
+					const values = notIn.map((v) => String(bindableFilterValue(v)));
+					conditions.push(sql`${ref} NOT IN (${jsonTextValues(db, values)})`);
+				} else {
+					conditions.push(sql`${ref} NOT IN (${sql.join(notIn.map((v) => sql`${bindableFilterValue(v)}`))})`);
+				}
+			}
+			const likePattern = (input: string) => `%${input.replace(/[!%_]/g, "!$&")}%`;
+			if (contains !== undefined) conditions.push(sql`LOWER(${ref}) LIKE LOWER(${likePattern(contains)}) ESCAPE '!'`);
+			if (notContains !== undefined) conditions.push(sql`LOWER(${ref}) NOT LIKE LOWER(${likePattern(notContains)}) ESCAPE '!'`);
 		} else if (Array.isArray(value)) {
 			if (value.length === 0) continue;
 			if (asJson.has(key)) {
@@ -1598,6 +1617,12 @@ export interface WhereRange {
 	gte?: string;
 	lt?: string;
 	lte?: string;
+	ne?: string;
+	notIn?: string[];
+	contains?: string;
+	notContains?: string;
+	exists?: true;
+	notExists?: true;
 }
 
 /**
@@ -1632,6 +1657,8 @@ export interface CollectionFilterBase {
 	 * @example { published_at: { gte: '2024-01-01', lt: '2025-01-01' } } - date range
 	 */
 	where?: Record<string, WhereValue>;
+	/** OR branches of field filters; predicates within each branch AND together. */
+	whereAny?: Record<string, WhereValue>[];
 	/**
 	 * Order results by field(s)
 	 * @default { created_at: "desc" }
@@ -1808,6 +1835,7 @@ export function emdashLoader(): LiveLoader<EntryData, EntryFilter, LoaderCollect
 				const limit = filter?.limit;
 				const cursor = filter?.cursor;
 				const where = filter?.where;
+				const whereAny = filter?.whereAny;
 				const orderBy = filter?.orderBy;
 				const locale = filter?.locale;
 
@@ -1843,10 +1871,21 @@ export function emdashLoader(): LiveLoader<EntryData, EntryFilter, LoaderCollect
 				// nothing (short-circuited to an empty result below).
 				let bylineFilter: { groups: string[] } | null = null;
 				const fieldFilters: Record<string, WhereValue> = {};
-
+				if (Array.isArray(whereAny) && whereAny.length > 20) return { error: new Error("whereAny exceeds the 20-branch limit") };
+				const taxNames = where || (Array.isArray(whereAny) && whereAny.length > 0) ? await getTaxonomyNames(db, type) : new Set<string>();
+				const fieldFilterAny: (Record<string, WhereValue> | null)[] = Array.isArray(whereAny)
+					? whereAny.slice(0, 20).map((branch) => {
+						if (!branch || typeof branch !== "object" || Array.isArray(branch)) return null;
+						const record = branch as Record<string, WhereValue>;
+						return Object.keys(record).some((key) => key === "byline" || taxNames.has(key)) ? null : record;
+					})
+					: [];
+				const countFilterParameters = (filters: Record<string, WhereValue>) => Object.values(filters).reduce((count, value) => {
+					if (Array.isArray(value)) return count + value.length;
+					if (isWhereRange(value)) return count + Object.entries(value).reduce((total, [key, bound]) => total + (bound === undefined || key === "exists" || key === "notExists" ? 0 : key === "notIn" && Array.isArray(bound) ? bound.length : 1), 0);
+					return count + (value == null ? 0 : 1);
+				}, 0);
 				if (where && Object.keys(where).length > 0) {
-					const taxNames = await getTaxonomyNames(db, type);
-
 					for (const [key, value] of Object.entries(where)) {
 						if (value == null) continue;
 						if (key === "byline") {
@@ -1872,9 +1911,15 @@ export function emdashLoader(): LiveLoader<EntryData, EntryFilter, LoaderCollect
 						}
 					}
 				}
+				const whereAnyParameterCount = fieldFilterAny.reduce((total, branch) => total + countFilterParameters(branch ?? {}), 0);
+				const whereParameterCount = where && typeof where === "object" && !Array.isArray(where) ? countFilterParameters(where) : 0;
+				if (fieldFilterAny.length > 0 && whereAnyParameterCount + whereParameterCount > 80) {
+					return { error: new Error("Combined where and whereAny filters exceed the safe database parameter budget") };
+				}
 
 				const storagelessKey = await findStoragelessQueryKey(type, [
 					...Object.keys(fieldFilters),
+					...fieldFilterAny.flatMap((branch) => branch ? Object.keys(branch) : []),
 					...Object.keys(orderBy ?? {}),
 				]);
 				if (storagelessKey) {
@@ -1889,12 +1934,12 @@ export function emdashLoader(): LiveLoader<EntryData, EntryFilter, LoaderCollect
 				// Only caller-supplied field columns may fail as invalid filters.
 				// Keep qualifiers so a folded system-table read cannot be mistaken
 				// for a caller field with the same name.
-				for (const key of [...Object.keys(fieldFilters), ...Object.keys(orderBy ?? {})]) {
+				for (const key of [...Object.keys(fieldFilters), ...fieldFilterAny.flatMap((branch) => branch ? Object.keys(branch) : []), ...Object.keys(orderBy ?? {})]) {
 					if (!FIELD_NAME_PATTERN.test(key) || SYSTEM_QUERY_KEYS.has(key)) continue;
 					const name = key.toLowerCase();
 					callerColumns.add(name);
 					callerColumns.add(`${tableName}.${name}`);
-					if (taxonomyFilters.length > 0 && Object.keys(fieldFilters).length === 0) {
+					if (taxonomyFilters.length > 0 && Object.keys(fieldFilters).length === 0 && fieldFilterAny.length === 0) {
 						callerColumns.add(`r.${name}`);
 					}
 				}
@@ -1909,7 +1954,7 @@ export function emdashLoader(): LiveLoader<EntryData, EntryFilter, LoaderCollect
 					return { entries: [], cacheHint: { tags: [type] } };
 				}
 
-				if (taxonomyFilters.length > 0 && Object.keys(fieldFilters).length === 0) {
+				if (taxonomyFilters.length > 0 && Object.keys(fieldFilters).length === 0 && fieldFilterAny.length === 0) {
 					// Pivot-drive fast path (#1834): seek the matching entries on the
 					// denormalized `content_taxonomies` pivot instead of scanning the
 					// whole collection and probing a taxonomy EXISTS per row. Only the
@@ -2013,6 +2058,14 @@ export function emdashLoader(): LiveLoader<EntryData, EntryFilter, LoaderCollect
 					const fieldConds = buildFieldConditions(db, fieldFilters);
 					const fieldCondsSQL =
 						fieldConds.length > 0 ? sql`${sql.join(fieldConds, sql` AND `)}` : null;
+					const anyBranches = fieldFilterAny.map((branch) => {
+						if (!branch) return sql`0 = 1`;
+						const conditions = buildFieldConditions(db, branch);
+						return conditions.length ? sql`(${sql.join(conditions, sql` AND `)})` : sql`0 = 1`;
+					});
+					const fieldAnySQL = fieldFilterAny.length
+						? sql`(${sql.join(anyBranches, sql` OR `)})`
+						: null;
 
 					// One `EXISTS` per taxonomy, AND'd together: an entry must be
 					// tagged with a matching term in *every* requested taxonomy.
@@ -2078,6 +2131,7 @@ export function emdashLoader(): LiveLoader<EntryData, EntryFilter, LoaderCollect
 						${taxonomyCond}
 						${bylineCond}
 						${fieldCondsSQL ? sql`AND ${fieldCondsSQL}` : sql``}
+						${fieldAnySQL ? sql`AND ${fieldAnySQL}` : sql``}
 						${orderByClause}
 						${limitOffsetClause}
 					`.execute(db);
